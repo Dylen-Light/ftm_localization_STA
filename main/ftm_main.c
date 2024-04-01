@@ -127,6 +127,7 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
         if (!internal)
         {
             num_aps = 0;
+            num_valid = 0;
             ftm_APs_record ftm_ap_record = {
                 .dist_est = -1,
                 .is_valid = true,
