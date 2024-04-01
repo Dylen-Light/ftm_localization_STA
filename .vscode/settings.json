@@ -1,0 +1,15 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.adapterTargetName": "esp32s3",
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.portWin": "COM10",
+  "idf.flashType": "UART",
+  "files.associations": {
+    "cmath": "cpp",
+    "matrix.h": "c",
+    "argtable3.h": "c"
+  },
+  "C_Cpp.errorSquiggles": "enabled"
+}
