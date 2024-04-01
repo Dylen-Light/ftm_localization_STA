@@ -100,3 +100,4 @@
 14610	16057	7336652237116563	bootloader.elf	d7c4d1de23ad2ad4
 16121	18617	7336652264363934	.bin_timestamp	91ee96cdbc164ea3
 18617	19950	0	esp-idf/esptool_py/CMakeFiles/bootloader_check_size	b33c2cbf08ffc03
+8	126	0	esp-idf/esptool_py/CMakeFiles/bootloader_check_size	b33c2cbf08ffc03

@@ -24,21 +24,28 @@
 
 #define MAX_APS 8
 
-struct ftm_APs_record
+// 支持FTM的AP设备信息
+typedef struct
 {
     wifi_ap_record_t ap_record;
     bool is_valid;
+    bool is_reported;
     double dist_est;
-};
+} ftm_APs_record;
+
 // AP位置坐标，二维，一维存储，预输入
 double ap_pos[6] = {54, 65, 33, 25, 87, 58};
+// 记录AP设备信息链表
+ftm_APs_record ftm_APs_record_list[MAX_APS];
+// 当前AP设备数目（包括已断开的），
+// 当前ftm请求的设备序号，
+// 目前仍有通讯的ap数目
+uint8_t num_aps, current_ap, num_valid;
 
 ESP_EVENT_DEFINE_BASE(END_SCAN_OR_FTM_EVENT);
-
 static bool first_scan = true;
 static bool s_reconnect = true;
 static const char *TAG_STA = "ftm_tag";
-uint8_t num_aps, current_ap;
 wifi_ap_record_t aps[MAX_APS];
 
 uint16_t scanned_ap_num;
@@ -106,7 +113,7 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
     if (ap_list_buffer)
     {
         free(ap_list_buffer);
-    } // 清空一下ap记录
+    } // 清空ap记录
 
     ap_list_buffer = malloc(scanned_ap_num * sizeof(wifi_ap_record_t));
     if (ap_list_buffer == NULL)
@@ -120,12 +127,19 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
         if (!internal)
         {
             num_aps = 0;
+            ftm_APs_record ftm_ap_record = {
+                .dist_est = -1,
+                .is_valid = true,
+                .is_reported = false,
+            };
             for (i = 0; i < scanned_ap_num; i++)
             {
                 if (num_aps < MAX_APS && ap_list_buffer[i].ftm_responder)
                 {
-                    aps[num_aps] = ap_list_buffer[i];
+                    ftm_ap_record.ap_record = ap_list_buffer[i];
+                    ftm_APs_record_list[num_aps] = ftm_ap_record;
                     num_aps += 1;
+                    num_valid += 1;
                 }
                 // ESP_LOGI(TAG_STA, "[%s][rssi=%d]""%s", ap_list_buffer[i].ssid, ap_list_buffer[i].rssi, ap_list_buffer[i].ftm_responder ? "[FTM Responder]" : "");
             }
@@ -239,6 +253,8 @@ static int execute_ftm(wifi_ap_record_t *ap_record)
     {
         ESP_LOGE(TAG_STA, "no AP record.");
         // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
+        ftm_APs_record_list[num_aps].is_valid = false;
+        num_valid -= 1;
         return 0;
     }
 
@@ -248,6 +264,8 @@ static int execute_ftm(wifi_ap_record_t *ap_record)
     {
         ESP_LOGE(TAG_STA, "Failed to start FTM session.");
         // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
+        ftm_APs_record_list[num_aps].is_valid = false;
+        num_valid -= 1;
         return 0;
     }
 
@@ -263,7 +281,7 @@ static void execute_localization()
     // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
     trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
     printf("\n------>localization result: [%d,%d]", (int)res[0], (int)res[1]);
-    vTaskDelay(500);
+    // vTaskDelay(500);
 }
 
 static int proccess_next_ap()
@@ -273,16 +291,26 @@ static int proccess_next_ap()
     // int res = execute_ftm(&aps[current_ap]);
     if (current_ap >= num_aps)
     {
+        // 一次循环结束
         current_ap = 0;
         // execute_localization();//调试用
-        if (num_aps == 3)
+        if (num_valid >= 3)
         {
-            execute_localization(); // 一次循环结束，执行定位
+            execute_localization(); // 大于三个AP，执行定位
         }
+        wifi_perform_scan(NULL, false); // 再次扫描，此次为被动模式
     }
 
     ESP_LOGI(TAG_STA, "Proccess_next_ap %d", current_ap);
-    return execute_ftm(&aps[current_ap]);
+
+    if (ftm_APs_record_list[current_ap].is_valid)
+    {
+        return execute_ftm(&ftm_APs_record_list[current_ap].ap_record);
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 void app_main(void)
@@ -303,13 +331,13 @@ void app_main(void)
 
     num_aps = 0;
     current_ap = -1;
-    wifi_perform_scan(NULL, false); // 开始扫AP
+    wifi_perform_scan(NULL, false); // 扫AP，除第一次外均为被动扫描
     // 维持一个序列
     // ftm并行
     // 被动扫描
     while (1)
     {
         proccess_next_ap();
-        vTaskDelay(500);
+        vTaskDelay(300);
     }
 }
