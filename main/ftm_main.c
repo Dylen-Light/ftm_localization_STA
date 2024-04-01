@@ -22,15 +22,15 @@
 #include "esp_console.h"
 #include "trilateration.h"
 
-#define MAX_APS 8
+// 设定为大于最大可能的AP数
+#define MAX_APS 5
 
 // 支持FTM的AP设备信息
 typedef struct
 {
     wifi_ap_record_t ap_record;
-    bool is_valid;
-    bool is_reported;
-    double dist_est;
+    bool volatile is_valid;
+    double volatile dist_est;
 } ftm_APs_record;
 
 // AP位置坐标，二维，一维存储，预输入
@@ -41,6 +41,14 @@ ftm_APs_record ftm_APs_record_list[MAX_APS];
 // 当前ftm请求的设备序号，
 // 目前仍有通讯的ap数目
 uint8_t num_aps, current_ap, num_valid;
+// 是否启用多线程
+bool is_multi_task = false;
+
+#define TASK_PRIO 1        // 任务优先级
+#define TASK_STK_SIZE 1024 // 任务堆栈大小
+TaskHandle_t ftm_task_handle;
+TaskHandle_t localization_task_handle;
+TaskHandle_t scan_task_handle;
 
 ESP_EVENT_DEFINE_BASE(END_SCAN_OR_FTM_EVENT);
 static bool first_scan = true;
@@ -62,6 +70,18 @@ wifi_ftm_report_entry_t *ftm_report;
 uint8_t ftm_report_num_entries;
 // 存储ftm测距信息
 double ftm_dist_est_buffer[MAX_APS];
+
+static uint8_t get_ap_id_by_mac_from_list(uint8_t *peer_mac)
+{
+    for (uint8_t i = 0; i < MAX_APS; i++)
+    {
+        if (memcmp(peer_mac, ftm_APs_record_list[i].ap_record.bssid, 6 * sizeof(uint8_t)) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
 
 static void wifi_connected_handler(void *arg, esp_event_base_t event_base,
                                    int32_t event_id, void *event_data)
@@ -131,7 +151,6 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
             ftm_APs_record ftm_ap_record = {
                 .dist_est = -1,
                 .is_valid = true,
-                .is_reported = false,
             };
             for (i = 0; i < scanned_ap_num; i++)
             {
@@ -168,7 +187,23 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
         ftm_report_num_entries = event->ftm_report_num_entries;
         printf("=====>>>  FTM raw result, dist: %dmm, RTT: %d", event->dist_est, event->rtt_raw);
 
-        ftm_dist_est_buffer[current_ap] = (double)event->dist_est; // 存储一个循环内的ftm距离信息
+        if (is_multi_task)
+        {
+            uint8_t ap_id = get_ap_id_by_mac_from_list(event->peer_mac);
+            if (ap_id != -1)
+            {
+                ftm_APs_record_list[ap_id].dist_est = (double)event->dist_est;
+            }
+            else
+            {
+                // 理论上不可能出现，仅发生在AP记录列表丢失时
+                ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.");
+            }
+        }
+        else
+        {
+            ftm_APs_record_list[current_ap].dist_est = (double)event->dist_est; // 存储一个循环内的ftm距离信息
+        }
 
         xEventGroupSetBits(ftm_event_group, FTM_REPORT_BIT);
     }
@@ -196,6 +231,50 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
         }
         xEventGroupSetBits(ftm_event_group, FTM_FAILURE_BIT);
     }
+}
+
+static int execute_ftm(wifi_ap_record_t *ap_record, uint8_t ap_id)
+{
+    ESP_LOGI(TAG_STA, "Executing FTM...");
+
+    if (!is_multi_task)
+    {
+        ap_id = num_aps;
+    }
+
+    wifi_ftm_initiator_cfg_t ftm_cfg = {
+        .frm_count = 32,
+        .burst_period = 2,
+    };
+
+    if (ap_record)
+    {
+        ESP_LOGI(TAG_STA, "Starting FTM with " MACSTR " on channel %d\n", MAC2STR(ap_record->bssid), ap_record->primary);
+        memcpy(ftm_cfg.resp_mac, ap_record->bssid, 6);
+        ftm_cfg.channel = ap_record->primary;
+        // 将读取到的ap信息写入到ftm配置中
+    }
+    else
+    {
+        ESP_LOGE(TAG_STA, "no AP record.");
+        // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
+        ftm_APs_record_list[ap_id].is_valid = false;
+        num_valid -= 1;
+        return 0;
+    }
+
+    // ESP_LOGI(TAG_STA, "Requesting FTM session with Frm Count - %d, Burst Period - %dmSec (0: No Preference)",ftm_cfg.frm_count, ftm_cfg.burst_period * 100);
+
+    if (ESP_OK != esp_wifi_ftm_initiate_session(&ftm_cfg)) // 启动ftm！
+    {
+        ESP_LOGE(TAG_STA, "Failed to start FTM session.");
+        // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
+        ftm_APs_record_list[ap_id].is_valid = false;
+        num_valid -= 1;
+        return 0;
+    }
+
+    return 0;
 }
 
 void initialise_wifi(void)
@@ -234,45 +313,6 @@ void initialise_wifi(void)
     initialized = true;
 }
 
-static int execute_ftm(wifi_ap_record_t *ap_record)
-{
-    ESP_LOGI(TAG_STA, "Executing FTM...");
-
-    wifi_ftm_initiator_cfg_t ftm_cfg = {
-        .frm_count = 32,
-        .burst_period = 2,
-    };
-
-    if (ap_record)
-    {
-        ESP_LOGI(TAG_STA, "Starting FTM with " MACSTR " on channel %d\n", MAC2STR(ap_record->bssid), ap_record->primary);
-        memcpy(ftm_cfg.resp_mac, ap_record->bssid, 6);
-        ftm_cfg.channel = ap_record->primary;
-        // 将读取到的ap信息写入到ftm配置中
-    }
-    else
-    {
-        ESP_LOGE(TAG_STA, "no AP record.");
-        // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
-        ftm_APs_record_list[num_aps].is_valid = false;
-        num_valid -= 1;
-        return 0;
-    }
-
-    // ESP_LOGI(TAG_STA, "Requesting FTM session with Frm Count - %d, Burst Period - %dmSec (0: No Preference)",ftm_cfg.frm_count, ftm_cfg.burst_period * 100);
-
-    if (ESP_OK != esp_wifi_ftm_initiate_session(&ftm_cfg)) // 启动ftm！
-    {
-        ESP_LOGE(TAG_STA, "Failed to start FTM session.");
-        // ESP_ERROR_CHECK(esp_event_post(END_SCAN_OR_FTM_EVENT, 0, NULL, 0, pdMS_TO_TICKS(100)));
-        ftm_APs_record_list[num_aps].is_valid = false;
-        num_valid -= 1;
-        return 0;
-    }
-
-    return 0;
-}
-
 static void execute_localization()
 {
     double res[2] = {-1, -1};
@@ -280,9 +320,64 @@ static void execute_localization()
     int disList_size[2] = {1, 2};
     // num_aps = 3;
     // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
+    for(int i = 0;i<3;i++){
+        ftm_dist_est_buffer[i] = ftm_APs_record_list[i].dist_est;
+    }
     trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
     printf("\n------>localization result: [%d,%d]", (int)res[0], (int)res[1]);
     // vTaskDelay(500);
+}
+
+void request_ap_task(uint8_t ap_id)
+{
+    while (1)
+    {
+        // uint8_t ap_id = (uint8_t *)pvParameters;
+        if (ftm_APs_record_list[ap_id].is_valid)
+        {
+            execute_ftm(&ftm_APs_record_list[ap_id].ap_record, ap_id);
+        }
+        else
+        {
+            char task_name[8];
+            sprintf(task_name, "task%u", ap_id);
+            ESP_LOGE(task_name, "failed to execute FTM.");
+        }
+        vTaskDelay(500);
+    }
+}
+
+void localization_task()
+{
+    while (1)
+    {
+        if (num_valid >= 3)
+        {
+            execute_localization();
+        }
+        vTaskDelay(800);
+    }
+}
+
+void scan_ap_list_task(){
+    while(1){
+        vTaskSuspend(ftm_task_handle);
+        wifi_perform_scan(NULL,false);
+        vTaskDelay(300);
+        vTaskResume(ftm_task_handle);
+        vTaskDelay(10000);
+    }
+}
+void init_ftm_task()
+{
+    is_multi_task = true;
+    xTaskCreate(localization_task, "localizationThread", TASK_STK_SIZE, NULL, TASK_PRIO, localization_task_handle);
+    xTaskCreate(scan_ap_list_task,"scanThread",TASK_STK_SIZE,NULL, TASK_PRIO-1,scan_task_handle);
+    for (uint8_t i = -1; i < MAX_APS; i++)
+    {
+        xTaskCreate(request_ap_task, "taskThread", TASK_STK_SIZE, (void *)i, TASK_PRIO, ftm_task_handle);
+    }
+    vTaskStartScheduler();
 }
 
 static int proccess_next_ap()
@@ -306,7 +401,7 @@ static int proccess_next_ap()
 
     if (ftm_APs_record_list[current_ap].is_valid)
     {
-        return execute_ftm(&ftm_APs_record_list[current_ap].ap_record);
+        return execute_ftm(&ftm_APs_record_list[current_ap].ap_record, 0);
     }
     else
     {
@@ -333,12 +428,14 @@ void app_main(void)
     num_aps = 0;
     current_ap = -1;
     wifi_perform_scan(NULL, false); // 扫AP，除第一次外均为被动扫描
-    // 维持一个序列
-    // ftm并行
-    // 被动扫描
-    while (1)
-    {
-        proccess_next_ap();
-        vTaskDelay(300);
-    }
+    init_ftm_task();
+
+    // 维持一个序列OK
+    // ftm并行OK
+    // 被动扫描OK
+    // while (1)
+    // {
+    //     proccess_next_ap();
+    //     vTaskDelay(300);
+    // }
 }
