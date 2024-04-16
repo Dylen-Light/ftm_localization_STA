@@ -187,7 +187,7 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
         ftm_report = event->ftm_report_data;
         ftm_report_num_entries = event->ftm_report_num_entries;
         printf("=====>>>  FTM raw result, dist: %dmm, RTT: %d\n", event->dist_est, event->rtt_raw);
-
+        printf("data for predicting:  RSSI: %d, RTT: %d\n", event->ftm_report_data->rssi, event->rtt_raw);
         if (is_multi_task)
         {
             uint8_t ap_id = get_ap_id_by_mac_from_list(event->peer_mac);
