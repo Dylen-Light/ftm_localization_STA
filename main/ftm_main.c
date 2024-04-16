@@ -45,7 +45,7 @@ uint8_t num_aps, current_ap, num_valid;
 bool is_multi_task = false;
 
 #define TASK_PRIO 1        // 任务优先级
-#define TASK_STK_SIZE 1024 // 任务堆栈大小
+#define TASK_STK_SIZE 4096 // 任务堆栈大小
 TaskHandle_t ftm_task_handle;
 TaskHandle_t localization_task_handle;
 TaskHandle_t scan_task_handle;
@@ -115,10 +115,10 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
     // scan_config.scan_type = WIFI_SCAN_TYPE_ACTIVE;
     uint8_t i;
 
-    if (!first_scan)
+    /*if (!first_scan)
     {
         scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
-    }
+    }*/
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
@@ -150,7 +150,7 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
             num_valid = 0;
             ftm_APs_record ftm_ap_record = {
                 .dist_est = -1,
-                .is_valid = true,
+                .is_valid = false,
             };
             for (i = 0; i < scanned_ap_num; i++)
             {
@@ -158,6 +158,7 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
                 {
                     ftm_ap_record.ap_record = ap_list_buffer[i];
                     ftm_APs_record_list[num_aps] = ftm_ap_record;
+                    ftm_APs_record_list[num_aps].is_valid = true;
                     num_aps += 1;
                     num_valid += 1;
                 }
@@ -185,7 +186,7 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
 
         ftm_report = event->ftm_report_data;
         ftm_report_num_entries = event->ftm_report_num_entries;
-        printf("=====>>>  FTM raw result, dist: %dmm, RTT: %d", event->dist_est, event->rtt_raw);
+        printf("=====>>>  FTM raw result, dist: %dmm, RTT: %d\n", event->dist_est, event->rtt_raw);
 
         if (is_multi_task)
         {
@@ -197,7 +198,7 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
             else
             {
                 // 理论上不可能出现，仅发生在AP记录列表丢失时
-                ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.");
+                ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.\n");
             }
         }
         else
@@ -320,64 +321,76 @@ static void execute_localization()
     int disList_size[2] = {1, 2};
     // num_aps = 3;
     // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
-    for(int i = 0;i<3;i++){
+    for (int i = 0; i < 3; i++)
+    {
         ftm_dist_est_buffer[i] = ftm_APs_record_list[i].dist_est;
     }
     trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
-    printf("\n------>localization result: [%d,%d]", (int)res[0], (int)res[1]);
+    printf("------>localization result: [%d,%d]\n", (int)res[0], (int)res[1]);
     // vTaskDelay(500);
 }
 
-void request_ap_task(uint8_t ap_id)
+void request_ap_task()
 {
+    uint8_t loop_time = 0;
     while (1)
     {
-        // uint8_t ap_id = (uint8_t *)pvParameters;
-        if (ftm_APs_record_list[ap_id].is_valid)
-        {
-            execute_ftm(&ftm_APs_record_list[ap_id].ap_record, ap_id);
-        }
-        else
+        for (uint8_t ap_id = 0; ap_id < MAX_APS; ap_id++)
         {
             char task_name[8];
             sprintf(task_name, "task%u", ap_id);
-            ESP_LOGE(task_name, "failed to execute FTM.");
+            if (ftm_APs_record_list[ap_id].is_valid)
+            {
+                execute_ftm(&ftm_APs_record_list[ap_id].ap_record, ap_id);
+                vTaskDelay(200);
+            }
+            else
+            {
+                ESP_LOGW(task_name, " connected an invalid AP.");
+            }
         }
-        vTaskDelay(500);
+        // uint8_t ap_id = (uint8_t *)pvParameters;
+        if (num_valid >= 3)
+        {
+            ESP_LOGI(TAG_STA,"excuting localization...");
+            execute_localization();
+        }
+        else
+        {
+            ESP_LOGW(TAG_STA,"need more valid APs, scanning...");
+            wifi_perform_scan(NULL, false);
+        }
+        vTaskDelay(150);
+        if(loop_time>=10){
+            ESP_LOGI(TAG_STA,"excuting gradual scanning...");
+            wifi_perform_scan(NULL, false);
+            loop_time = 0;
+        }
     }
 }
 
-void localization_task()
+void scan_ap_list_task()
 {
     while (1)
     {
-        if (num_valid >= 3)
-        {
-            execute_localization();
-        }
-        vTaskDelay(800);
-    }
-}
-
-void scan_ap_list_task(){
-    while(1){
+        vTaskDelay(10000);
         vTaskSuspend(ftm_task_handle);
-        wifi_perform_scan(NULL,false);
+        wifi_perform_scan(NULL, false);
         vTaskDelay(300);
         vTaskResume(ftm_task_handle);
-        vTaskDelay(10000);
     }
 }
 void init_ftm_task()
 {
     is_multi_task = true;
-    xTaskCreate(localization_task, "localizationThread", TASK_STK_SIZE, NULL, TASK_PRIO, localization_task_handle);
-    xTaskCreate(scan_ap_list_task,"scanThread",TASK_STK_SIZE,NULL, TASK_PRIO-1,scan_task_handle);
-    for (uint8_t i = -1; i < MAX_APS; i++)
-    {
-        xTaskCreate(request_ap_task, "taskThread", TASK_STK_SIZE, (void *)i, TASK_PRIO, ftm_task_handle);
-    }
-    vTaskStartScheduler();
+    ESP_LOGI(TAG_STA, "preparing init ftm tasks...");
+    // xTaskCreate(request_ap_task, "taskThread", TASK_STK_SIZE, NULL, TASK_PRIO, ftm_task_handle);
+    ESP_LOGI(TAG_STA, "preparing init support tasks...");
+    // xTaskCreate(localization_task, "localizationThread", TASK_STK_SIZE, NULL, TASK_PRIO, localization_task_handle);
+    // xTaskCreate(scan_ap_list_task,"scanThread",TASK_STK_SIZE,NULL, TASK_PRIO+1,scan_task_handle);
+    // vTaskStartScheduler();
+    ESP_LOGI(TAG_STA, "task init done.");
+    request_ap_task();
 }
 
 static int proccess_next_ap()
