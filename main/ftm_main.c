@@ -33,8 +33,20 @@ typedef struct
     double volatile dist_est;
 } ftm_APs_record;
 
+// 设定AP的MAC地址
+uint8_t mac_add[MAX_APS][6] = {{0x70, 0x04, 0x1D, 0x4C, 0xCF, 0x8C},
+                               {0x70, 0x04, 0x1D, 0x4C, 0xD0, 0x78},
+                               {0x70, 0x04, 0x1D, 0x4C, 0xD0, 0x4C}};
 // AP位置坐标，二维，一维存储，预输入
-double ap_pos[6] = {54, 65, 33, 25, 87, 58};
+float ap_pos[6] = {54.12, 65.6, 33.87, 25.25, 87.16, 58.25};
+typedef struct
+{
+    uint8_t mac_address[6];
+    float pos_x;
+    float pos_y;
+} AP_Position;
+AP_Position AP_pos[MAX_APS];
+
 // 记录AP设备信息链表
 ftm_APs_record ftm_APs_record_list[MAX_APS];
 // 当前AP设备数目（包括已断开的），
@@ -71,6 +83,25 @@ uint8_t ftm_report_num_entries;
 // 存储ftm测距信息
 double ftm_dist_est_buffer[MAX_APS];
 
+static void initialize_ap_pos()
+{
+    ESP_LOGI(TAG_STA, "constructing AP_Pos...");
+    for (uint8_t i = 0; i < MAX_APS; i++)
+    {
+        memcpy(AP_pos[i].mac_address, mac_add[i], 6 * sizeof(uint8_t));
+        AP_pos[i].pos_x = ap_pos[2 * i];
+        AP_pos[i].pos_y = ap_pos[2 * i + 1];
+    }
+    // for (uint8_t i = 0; i < 3; i++)
+    // {
+    //     printf("MAC address: ");
+    //     for (uint8_t j = 0; j < 6; j++)
+    //     {
+    //         printf("%02X", AP_pos[i].mac_address[j]);
+    //     }
+    //     printf("AP_pos[%d]: {%.2f,%.2f}", i, AP_pos[i].pos_x, AP_pos[i].pos_y);
+    // }
+}
 static uint8_t get_ap_id_by_mac_from_list(uint8_t *peer_mac)
 {
     for (uint8_t i = 0; i < MAX_APS; i++)
@@ -80,7 +111,32 @@ static uint8_t get_ap_id_by_mac_from_list(uint8_t *peer_mac)
             return i;
         }
     }
-    return -1;
+    return 255;
+}
+static uint8_t get_ap_pos_by_mac(uint8_t *peer_mac)
+{
+    peer_mac[5]--;//因为一些未知的机制，这里的peermac会比原始值大1
+    for (uint8_t i = 0; i < MAX_APS; i++)
+    {
+        //debug用的：
+        // printf("get pos by MAC address: ");
+        // for (uint8_t j = 0; j < 6; j++)
+        // {
+        //     printf("%02X", AP_pos[i].mac_address[j]);
+            
+        // }
+        // printf("\n");
+        // for (uint8_t j = 0; j < 6; j++)
+        // {
+        //     printf("%02X", peer_mac[j]);
+        // }
+        
+        if (memcmp(peer_mac, AP_pos[i].mac_address, 6 * sizeof(uint8_t)) == 0)
+        {
+            return i;
+        }
+    }
+    return 255;
 }
 
 static void wifi_connected_handler(void *arg, esp_event_base_t event_base,
@@ -167,7 +223,6 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
         }
     }
     ESP_LOGI(TAG_STA, "Scan done, %d aps found", num_aps);
-    // 相较于原示例代码提取了符合条件的ap数量
     first_scan = false;
     return true;
 }
@@ -186,12 +241,23 @@ static void ftm_report_handler(void *arg, esp_event_base_t event_base,
 
         ftm_report = event->ftm_report_data;
         ftm_report_num_entries = event->ftm_report_num_entries;
-        printf("=====>>>  FTM raw result, dist: %dmm, RTT: %d\n", event->dist_est, event->rtt_raw);
-        printf("data for predicting:  RSSI: %d, RTT: %d\n", event->ftm_report_data->rssi, event->rtt_raw);
+        printf("=====>>>  FTM raw result, dist: %dmm, RTT: %df\n", event->dist_est, event->rtt_raw);
+
+        uint8_t ap_id = get_ap_id_by_mac_from_list(event->peer_mac);
+        uint8_t ap_pos_id = get_ap_pos_by_mac(event->peer_mac);
+        if (ap_pos_id == 255)
+        {
+            ESP_LOGW(TAG_STA, "can't find mac.");
+        }
+        printf("data for predicting:  RSSI: %d, RTT: %d, APid: %d, AP_X: %.2f, AP_Y: %.2f\n",
+               event->ftm_report_data->rssi,
+               event->rtt_raw,
+               ap_id,
+               AP_pos[ap_pos_id].pos_x,
+               AP_pos[ap_pos_id].pos_y);
         if (is_multi_task)
         {
-            uint8_t ap_id = get_ap_id_by_mac_from_list(event->peer_mac);
-            if (ap_id != -1)
+            if (ap_id != 255)
             {
                 ftm_APs_record_list[ap_id].dist_est = (double)event->dist_est;
             }
@@ -348,21 +414,24 @@ void request_ap_task()
             {
                 ESP_LOGW(task_name, " connected an invalid AP.");
             }
+            // 测试数据
+            // printf("data for predicting:  RSSI: %.2f, RTT: %.2f\n",13.62, 9.13);
         }
         // uint8_t ap_id = (uint8_t *)pvParameters;
         if (num_valid >= 3)
         {
-            ESP_LOGI(TAG_STA,"excuting localization...");
-            execute_localization();
+            ESP_LOGI(TAG_STA, "excuting localization...");
+            // execute_localization();
         }
         else
         {
-            ESP_LOGW(TAG_STA,"need more valid APs, scanning...");
+            ESP_LOGW(TAG_STA, "need more valid APs, scanning...");
             wifi_perform_scan(NULL, false);
         }
         vTaskDelay(150);
-        if(loop_time>=10){
-            ESP_LOGI(TAG_STA,"excuting gradual scanning...");
+        if (loop_time >= 10)
+        {
+            ESP_LOGI(TAG_STA, "excuting gradual scanning...");
             wifi_perform_scan(NULL, false);
             loop_time = 0;
         }
@@ -392,7 +461,7 @@ void init_ftm_task()
     ESP_LOGI(TAG_STA, "task init done.");
     request_ap_task();
 }
-
+/*
 static int proccess_next_ap()
 {
 
@@ -421,7 +490,7 @@ static int proccess_next_ap()
         return 0;
     }
 }
-
+*/
 void app_main(void)
 {
     // 初始化内存
@@ -438,6 +507,7 @@ void app_main(void)
     initialise_wifi();
     ESP_LOGI(TAG_STA, "wifi initialized.");
 
+    initialize_ap_pos();
     num_aps = 0;
     current_ap = -1;
     wifi_perform_scan(NULL, false); // 扫AP，除第一次外均为被动扫描
