@@ -41,14 +41,9 @@
 
 // 设定为大于最大可能的AP数
 #define MAX_APS 5
+// 本设备名称
+static const char *TAG_STA = "ftm_tag";
 
-// 支持FTM的AP设备信息
-typedef struct
-{
-    wifi_ap_record_t ap_record;
-    bool volatile is_valid;
-    double volatile dist_est;
-} ftm_APs_record;
 // 设定STA（本设备）的MAC地址
 static const uint8_t CONFIG_CSI_SEND_MAC[] = {0x1a, 0x00, 0x00, 0x00, 0x00, 0x00};
 // 设定AP的MAC地址
@@ -57,6 +52,8 @@ uint8_t mac_add[MAX_APS][6] = {{0x70, 0x04, 0x1D, 0x4C, 0xCF, 0x8C},
                                {0x70, 0x04, 0x1D, 0x4C, 0xD0, 0x4C}};
 // AP位置坐标，二维，一维存储，预输入
 float ap_pos[6] = {54.12, 65.6, 33.87, 25.25, 87.16, 58.25};
+
+// 设定好的FTMAP设备全集的部分信息
 typedef struct
 {
     uint8_t mac_address[6];
@@ -64,11 +61,21 @@ typedef struct
     float pos_y;
     wifi_csi_info_t csi_info;
     bool is_csi_empty;
+    double volatile dist_est;
 } AP_Info;
 AP_Info AP_Infomation[MAX_APS];
 
-// 记录AP设备信息链表
+// 实时扫描到的支持FTM的AP设备信息
+typedef struct
+{
+    wifi_ap_record_t ap_record;
+    bool volatile is_valid;
+    //实时记录当前设备是否有效
+} ftm_APs_record;
+// 记录AP设备信息表
 ftm_APs_record ftm_APs_record_list[MAX_APS];
+
+
 // 当前AP设备数目（包括已断开的），
 // 当前ftm请求的设备序号，
 // 目前仍有通讯的ap数目
@@ -78,29 +85,27 @@ bool is_multi_task = false;
 
 TaskHandle_t ftm_task_handle;
 TaskHandle_t csi_task_handle;
-TaskHandle_t localization_task_handle;
-TaskHandle_t scan_task_handle;
 
 static bool first_scan = true;
 static bool s_reconnect = true;
-static const char *TAG_STA = "ftm_tag";
-wifi_ap_record_t aps[MAX_APS];
+
 uint8_t loop_time = 0; // 标示ftm循环次数
+
+//扫描时用到的缓冲数组
 uint16_t scanned_ap_num;
 wifi_ap_record_t *ap_list_buffer;
-
-static EventGroupHandle_t s_wifi_event_group;
-static EventGroupHandle_t wifi_event_group;
-const int CONNECTED_BIT = BIT0;
-const int DISCONNECTED_BIT = BIT1;
-
-const int FTM_REPORT_BIT = BIT0;
-const int FTM_FAILURE_BIT = BIT1;
-static EventGroupHandle_t ftm_event_group;
 wifi_ftm_report_entry_t *ftm_report;
 uint8_t ftm_report_num_entries;
-// 存储ftm测距信息
-double ftm_dist_est_buffer[MAX_APS];
+
+
+//任务组用到的标识bit，用于状态控制
+static EventGroupHandle_t s_wifi_event_group;
+static EventGroupHandle_t wifi_event_group;
+static EventGroupHandle_t ftm_event_group;
+const int CONNECTED_BIT = BIT0;
+const int DISCONNECTED_BIT = BIT1;
+const int FTM_REPORT_BIT = BIT0;
+const int FTM_FAILURE_BIT = BIT1;
 
 static void initialize_ap_infomation()
 {
@@ -113,15 +118,6 @@ static void initialize_ap_infomation()
         AP_Infomation[i].is_csi_empty = true;
     }
     ESP_LOGI(TAG_STA, "initialise csi info...");
-    // for (uint8_t i = 0; i < 3; i++)
-    // {
-    //     printf("MAC address: ");
-    //     for (uint8_t j = 0; j < 6; j++)
-    //     {
-    //         printf("%02X", AP_Infomation[i].mac_address[j]);
-    //     }
-    //     printf("AP_Infomation[%d]: {%.2f,%.2f}", i, AP_Infomation[i].pos_x, AP_Infomation[i].pos_y);
-    // }
 }
 static uint8_t get_ap_id_by_mac_from_list(uint8_t *peer_mac)
 {
@@ -226,7 +222,6 @@ static bool wifi_perform_scan(const char *ssid, bool internal)
             num_aps = 0;
             num_valid = 0;
             ftm_APs_record ftm_ap_record = {
-                .dist_est = -1,
                 .is_valid = false,
             };
             for (i = 0; i < scanned_ap_num; i++)
@@ -297,23 +292,25 @@ static void wifi_ftm_handler(void *arg, esp_event_base_t event_base,
             ets_printf("]\"\n");
         }
 
+        AP_Infomation[ap_local_storage_id].dist_est= (double)event->dist_est;
 
-        if (is_multi_task)
-        {
-            if (ap_id != 255)
-            {
-                ftm_APs_record_list[ap_id].dist_est = (double)event->dist_est;
-            }
-            else
-            {
-                // 理论上不可能出现，仅发生在AP记录列表丢失时
-                ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.\n");
-            }
-        }
-        else
-        {
-            ftm_APs_record_list[current_ap].dist_est = (double)event->dist_est; // 存储一个循环内的ftm距离信息
-        }
+
+        // if (is_multi_task)
+        // {
+        //     if (ap_id != 255)
+        //     {
+        //         AP_Infomation[ap_local_storage_id].dist_est= (double)event->dist_est;
+        //     }
+        //     else
+        //     {
+        //         // 理论上不可能出现，仅发生在AP记录列表丢失时
+        //         ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.\n");
+        //     }
+        // }
+        // else
+        // {
+        //     ftm_APs_record_list[current_ap].dist_est = (double)event->dist_est; // 存储一个循环内的ftm距离信息
+        // }
 
         xEventGroupSetBits(ftm_event_group, FTM_REPORT_BIT);
         // ESP_ERROR_CHECK(esp_event_post(CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
@@ -367,7 +364,7 @@ static void wifi_csi_handler(void *ctx, wifi_csi_info_t *info)
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
 
     // ESP_LOGI(TAG_STA,"csi info detected and collected.");
-    ESP_LOGI(TAG_STA, "csi from mac: " MACSTR "has been stored.", MAC2STR(info->mac));
+    //ESP_LOGI(TAG_STA, "csi from mac: " MACSTR "has been stored.", MAC2STR(info->mac));
     AP_Infomation[ap_csi_id].csi_info = *info;
     AP_Infomation[ap_csi_id].is_csi_empty = false;
 
@@ -400,6 +397,7 @@ static int execute_ftm(wifi_ap_record_t *ap_record, uint8_t ap_id)
     if (!is_multi_task)
     {
         ap_id = num_aps;
+        //这是简略方式，多线程下需要逐一对比mac地址
     }
 
     wifi_ftm_initiator_cfg_t ftm_cfg = {
@@ -506,18 +504,23 @@ static void initialise_csi(void *parameter)
 
 static void execute_localization()
 {
-    double res[2] = {-1, -1};
-    int nodeList_size[2] = {2, 2};
-    int disList_size[2] = {1, 2};
-    // num_aps = 3;
-    // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
-    for (int i = 0; i < 3; i++)
-    {
-        ftm_dist_est_buffer[i] = ftm_APs_record_list[i].dist_est;
-    }
-    trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
-    printf("------>localization result: [%d,%d]\n", (int)res[0], (int)res[1]);
-    // vTaskDelay(500);
+
+    //this function has been transplantied to PC.
+
+    // double res[2] = {-1, -1};
+    // int nodeList_size[2] = {2, 2};
+    // int disList_size[2] = {1, 2};
+    // // num_aps = 3;
+    // // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
+    // for (int i = 0; i < 3; i++)
+    // {
+    //     ftm_dist_est_buffer[i] = ftm_APs_record_list[i].dist_est;
+    // }
+    // trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
+    // printf("------>localization result: [%d,%d]\n", (int)res[0], (int)res[1]);
+    // // vTaskDelay(500);
+
+
 }
 
 void request_ap_task()
