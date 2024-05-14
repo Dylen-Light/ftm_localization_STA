@@ -446,7 +446,7 @@ void request_ap_task()
             {
                 execute_ftm(&ftm_APs_record_list[ap_id].ap_record, ap_id);
                 // 正常情况下这里触发一次ftm_handler
-                vTaskDelay(150);
+                vTaskDelay(100);
             }
             else
             {
