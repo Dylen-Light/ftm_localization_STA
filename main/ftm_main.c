@@ -1,10 +1,7 @@
-/* Wi-Fi FTM Example
+/* Wi-Fi FTM TAG
 
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
+   This code is for FTM indoor localization system STA.
+   Run with code for APs.
 */
 
 #include <errno.h>
@@ -258,7 +255,7 @@ static void wifi_ftm_handler(void *arg, esp_event_base_t event_base,
 
         ftm_report = event->ftm_report_data;
         ftm_report_num_entries = event->ftm_report_num_entries;
-        printf("=====>>>  FTM raw result, dist: %dmm, RTT: %df\n", (int)event->dist_est, (int)event->rtt_raw);
+        printf("=====>>>  FTM raw result, dist: %lumm, RTT: %luf\n", event->dist_est, event->rtt_raw);
 
         uint8_t ap_id = get_ap_id_by_mac_from_list(event->peer_mac);
         uint8_t ap_local_storage_id = get_ap_pos_by_mac(event->peer_mac);
@@ -268,49 +265,33 @@ static void wifi_ftm_handler(void *arg, esp_event_base_t event_base,
         }
 
 
-        printf("data for predicting:  RSSI: %d, RTT: %d, APid: %d, AP_X: %.2f, AP_Y: %.2f",
-               (int)event->ftm_report_data->rssi,
-               (int)event->rtt_raw,
+        printf("data for predicting: APid: %d, AP_X: %.2f, AP_Y: %.2f, RSSI: %d, RTT: %lu,",
                ap_id,
                AP_Infomation[ap_local_storage_id].pos_x,
-               AP_Infomation[ap_local_storage_id].pos_y);
+               AP_Infomation[ap_local_storage_id].pos_y,
+               (int)event->ftm_report_data->rssi,
+               event->rtt_raw
+               );
         if (!AP_Infomation[ap_local_storage_id].is_csi_empty)
         {
             wifi_csi_info_t *info = &AP_Infomation[ap_local_storage_id].csi_info;
             const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
-            ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-                       0, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
-                       rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
-                       rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
-                       rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
-                       rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->rx_state);
-            ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, info->buf[0]);
+            // ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+            //            0, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
+            //            rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
+            //            rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
+            //            rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
+            //            rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->rx_state);
+            //printf(",%d,%d,[%d", info->len, info->first_word_invalid, info->buf[0]);
+            printf("[%d", info->buf[0]);
             for (int i = 1; i < info->len; i++)
             {
-                ets_printf(",%d", info->buf[i]);
+                printf(",%d", info->buf[i]);
             }
-            ets_printf("]\"\n");
+            printf("]\n");
         }
 
         AP_Infomation[ap_local_storage_id].dist_est= (double)event->dist_est;
-
-
-        // if (is_multi_task)
-        // {
-        //     if (ap_id != 255)
-        //     {
-        //         AP_Infomation[ap_local_storage_id].dist_est= (double)event->dist_est;
-        //     }
-        //     else
-        //     {
-        //         // 理论上不可能出现，仅发生在AP记录列表丢失时
-        //         ESP_LOGW(TAG_STA, "Unexpected FTM Report received, wait for next scan.\n");
-        //     }
-        // }
-        // else
-        // {
-        //     ftm_APs_record_list[current_ap].dist_est = (double)event->dist_est; // 存储一个循环内的ftm距离信息
-        // }
 
         xEventGroupSetBits(ftm_event_group, FTM_REPORT_BIT);
         // ESP_ERROR_CHECK(esp_event_post(CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
@@ -368,26 +349,6 @@ static void wifi_csi_handler(void *ctx, wifi_csi_info_t *info)
     AP_Infomation[ap_csi_id].csi_info = *info;
     AP_Infomation[ap_csi_id].is_csi_empty = false;
 
-    // if (!s_count)
-    // {
-    //     ESP_LOGI(TAG_STA, "================ CSI RECV ================");
-    //     ets_printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,len,first_word,data\n");
-    // }
-
-    // ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-    //            s_count++, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
-    //            rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
-    //            rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
-    //            rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
-    //            rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->rx_state);
-    // ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, info->buf[0]);
-    // for (int i = 1; i < info->len; i++)
-    // {
-    //     ets_printf(",%d", info->buf[i]);
-    // }
-    // ets_printf("]\"\n");
-
-    // ESP_ERROR_CHECK(esp_event_post(CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
 }
 
 static int execute_ftm(wifi_ap_record_t *ap_record, uint8_t ap_id)
@@ -437,12 +398,6 @@ static int execute_ftm(wifi_ap_record_t *ap_record, uint8_t ap_id)
 
 static void initialise_csi(void *parameter)
 {
-    // vTaskSuspend(ftm_task_handle);
-    //  csi_info_queue = xQueueCreate(CSI_QUEUE_SIZE, sizeof(wifi_csi_info_t));
-    //  if (csi_info_queue == NULL) {
-    //      ESP_LOGE(TAG_STA, "Create queue fail");
-    //      return;
-    //  }
     while (1)
     {
         ESP_LOGI(TAG_STA, "csi task called.");
@@ -468,57 +423,13 @@ static void initialise_csi(void *parameter)
         ESP_ERROR_CHECK(esp_wifi_set_csi(true));
         ESP_LOGI(TAG_STA, "csi listener configured done.");
         vTaskDelay(500);
-    }
-    // ESP_LOGI(TAG_STA, "csi task called.");
-    // ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    // // ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(g_wifi_radar_config->wifi_sniffer_cb));
-
-    // /**< default config */
-    // wifi_csi_config_t csi_config = {
-    //     .lltf_en = true,
-    //     .htltf_en = true,
-    //     .stbc_htltf2_en = true,
-    //     .ltf_merge_en = true,
-    //     .channel_filter_en = true,
-    //     .manu_scale = false,
-    //     .shift = false,
-    // };
-    // ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
-    // ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_handler, NULL));
-    // ESP_ERROR_CHECK(esp_wifi_set_csi(true));
-    // ESP_LOGI(TAG_STA, "csi listener configured done.");
-
-    // uint8_t delay = 0;
-    //  while(1){
-    //      vTaskDelay(1);
-    //      delay++;
-    //      if(delay>=1000){
-    //          delay = 0;
-    //          ESP_LOGI(TAG_STA,"yes, csi task is still runing.");
-    //          //vTaskResume(ftm_task_handle);
-    //      }
-    //  };
-    //  ESP_ERROR_CHECK(esp_event_post(CSI_EVENT,))
-    // ESP_ERROR_CHECK(esp_event_post_to(csi_task_loop_handle,CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
+    } 
 }
 
 static void execute_localization()
 {
 
     //this function has been transplantied to PC.
-
-    // double res[2] = {-1, -1};
-    // int nodeList_size[2] = {2, 2};
-    // int disList_size[2] = {1, 2};
-    // // num_aps = 3;
-    // // double dist_test[8] = {1.155,1.155,1.115,1.155,1.155,1.115,1.155,1.155};
-    // for (int i = 0; i < 3; i++)
-    // {
-    //     ftm_dist_est_buffer[i] = ftm_APs_record_list[i].dist_est;
-    // }
-    // trilateration(num_aps, ap_pos, nodeList_size, ftm_dist_est_buffer, disList_size, res);
-    // printf("------>localization result: [%d,%d]\n", (int)res[0], (int)res[1]);
-    // // vTaskDelay(500);
 
 
 }
@@ -603,49 +514,10 @@ void request_ap_task()
     // ESP_ERROR_CHECK(esp_event_post(FTM_EVENT,FTM_LOOP_START_EVENT,NULL,0,portMAX_DELAY));
 }
 
-void scan_ap_list_task()
-{
-    while (1)
-    {
-        vTaskDelay(10000);
-        vTaskSuspend(ftm_task_handle);
-        wifi_perform_scan(NULL, false);
-        vTaskDelay(300);
-        vTaskResume(ftm_task_handle);
-    }
-}
-
-void infinite_loop(void *p)
-{
-    for (int i = 0;; i++)
-    {
-        ESP_LOGI(TAG_STA, "I am infinite loop.");
-        vTaskDelay(100);
-        if (i >= 10)
-        {
-            i = 0;
-        }
-    }
-}
-
 void init_ftm_task()
 {
     xTaskCreate(initialise_csi, "csi_handler_task", 1024, NULL, 4, csi_task_handle);
     xTaskCreate(request_ap_task, "request_ap_task", 4096, NULL, 1, ftm_task_handle);
-    // xTaskCreate(infinite_loop,"infinite_loop", 1024, NULL, 1, NULL);
-    // request_ap_task();
-    //  is_multi_task = true;
-    //  ESP_LOGI(TAG_STA, "preparing init ftm tasks...");
-    //  xTaskCreate(request_ap_task, "taskThread", TASK_STK_SIZE, NULL, TASK_PRIO, ftm_task_handle);
-    //  ESP_LOGI(TAG_STA, "preparing init support tasks...");
-    //  xTaskCreate(localization_task, "localizationThread", TASK_STK_SIZE, NULL, TASK_PRIO, localization_task_handle);
-    //  xTaskCreate(scan_ap_list_task,"scanThread",TASK_STK_SIZE,NULL, TASK_PRIO+1,scan_task_handle);
-    // vTaskStartScheduler();
-    //  ESP_LOGI(TAG_STA, "task init done.");
-    // request_ap_task();
-    // ESP_ERROR_CHECK(esp_event_post_to(csi_task_loop_handle,CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
-    // ESP_ERROR_CHECK(esp_event_post(CSI_EVENT,CSI_LISTEN_START_EVENT,NULL,0,portMAX_DELAY));
-    // ESP_ERROR_CHECK(esp_event_post(FTM_EVENT,FTM_LOOP_START_EVENT,NULL,0,portMAX_DELAY));
 }
 
 void initialise_wifi(void)
